@@ -25,6 +25,25 @@
  */
 
 /*
+ * This is a cut down, hopefully simplified version of the dev_hid_composite
+ * example which comes with the Raspberry Pi Pico:
+ *
+ * https://github.com/raspberrypi/pico-examples/tree/master/usb/device/dev_hid_composite
+ *
+ * I only wanted the keyboard bit - i.e. a Pico to behave like a programmable
+ * USB keyboard sending characters into the PC - so I cut out all the other stuff
+ * in the example (which, initially at least, I couldn't get working).
+ *
+ * Build and program it, then connect the Pico to a PC using a suitable USB
+ * cable. The PC will power the Pico via that cable; the cable also doubles
+ * up as the data cable. Open a text editor or similar on the PC, then press
+ * the Pico's white BOOTSEL button. It should send a letter 'a' to the PC
+ * via USB which you'll see "typed" in the text editor.
+ *
+ * If that much works, you've got everything set up correctly.
+ */
+
+/*
  * cmake -DCMAKE_BUILD_TYPE=Debug ..
  * make -j10
  *
@@ -42,9 +61,9 @@
  *
  * With the home made Pico probe:
  *
- * sudo openocd -f interface/picoprobe.cfg -f target/rp2040.cfg -c "program ./program pico_usb_keyboard.elf verify reset exit"
+ * sudo openocd -f interface/picoprobe.cfg -f target/rp2040.cfg \
+ *              -c "program ./program pico_usb_keyboard.elf verify reset exit"
  *
-
  */
 
 #include <stdlib.h>
@@ -56,76 +75,37 @@
 
 #include "usb_descriptors.h"
 
-//--------------------------------------------------------------------+
-// MACRO CONSTANT TYPEDEF PROTYPES
-//--------------------------------------------------------------------+
+static void hid_task(void);
 
-/* Blink pattern
- * - 250 ms  : device not mounted
- * - 1000 ms : device mounted
- * - 2500 ms : device is suspended
- */
-enum  {
-  BLINK_NOT_MOUNTED = 250,
-  BLINK_MOUNTED = 1000,
-  BLINK_SUSPENDED = 2500,
-};
-
-static uint32_t blink_interval_ms = BLINK_NOT_MOUNTED;
-
-void led_blinking_task(void);
-void hid_task(void);
-
-/*------------- MAIN -------------*/
 int main(void)
 {
+  /* Initialise USB*/
   board_init();
   tusb_init();
 
   while (1)
   {
-    tud_task(); // tinyusb device task
-    led_blinking_task();
+    /*
+     * Periodically call Tiny USB main thread controller/delegater so it
+     * can queue up events that need processing, despatch callbacks, etc
+     */
+    tud_task();
 
+    /*
+     * Call this program's HID task handler, which means sending out
+     * key "presses" as required
+     */
     hid_task();
   }
 }
 
-//--------------------------------------------------------------------+
-// Device callbacks
-//--------------------------------------------------------------------+
-
-// Invoked when device is mounted
-void tud_mount_cb(void)
-{
-  blink_interval_ms = BLINK_MOUNTED;
-}
-
-// Invoked when device is unmounted
-void tud_umount_cb(void)
-{
-  blink_interval_ms = BLINK_NOT_MOUNTED;
-}
-
-// Invoked when usb bus is suspended
-// remote_wakeup_en : if host allow us  to perform remote wakeup
-// Within 7ms, device must draw an average of current less than 2.5 mA from bus
-void tud_suspend_cb(bool remote_wakeup_en)
-{
-  (void) remote_wakeup_en;
-  blink_interval_ms = BLINK_SUSPENDED;
-}
-
-// Invoked when usb bus is resumed
-void tud_resume_cb(void)
-{
-  blink_interval_ms = BLINK_MOUNTED;
-}
-
-//--------------------------------------------------------------------+
-// USB HID
-//--------------------------------------------------------------------+
-
+/*
+ * Local handler code, called when a key press needs to be sent
+ * out to the host PC. btn is the state of the Pico's button.
+ * If the button is down we send the keypress. If the button
+ * is not down we send a NULL keypress to confirm there is
+ * no more for now.
+ */
 static void send_hid_report(uint8_t report_id, uint32_t btn)
 {
   // skip if hid is not ready yet
@@ -145,82 +125,32 @@ static void send_hid_report(uint8_t report_id, uint32_t btn)
 
 	tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, keycode);
         has_keyboard_key = true;
-      }else
+      }
+      else
       {
         // send empty key report if previously has key pressed
-        if (has_keyboard_key) tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, NULL);
+        if (has_keyboard_key)
+	  tud_hid_keyboard_report(REPORT_ID_KEYBOARD, 0, NULL);
+
         has_keyboard_key = false;
       }
     }
     break;
-#if 0
-    case REPORT_ID_MOUSE:
-    {
-      int8_t const delta = 5;
 
-      // no button, right + down, no scroll, no pan
-      tud_hid_mouse_report(REPORT_ID_MOUSE, 0x00, delta, delta, 0, 0);
-    }
+    default:
     break;
-
-    case REPORT_ID_CONSUMER_CONTROL:
-    {
-      // use to avoid send multiple consecutive zero report
-      static bool has_consumer_key = false;
-
-      if ( btn )
-      {
-        // volume down
-        uint16_t volume_down = HID_USAGE_CONSUMER_VOLUME_DECREMENT;
-        tud_hid_report(REPORT_ID_CONSUMER_CONTROL, &volume_down, 2);
-        has_consumer_key = true;
-      }else
-      {
-        // send empty key report (release key) if previously has key pressed
-        uint16_t empty_key = 0;
-        if (has_consumer_key) tud_hid_report(REPORT_ID_CONSUMER_CONTROL, &empty_key, 2);
-        has_consumer_key = false;
-      }
-    }
-    break;
-
-    case REPORT_ID_GAMEPAD:
-    {
-      // use to avoid send multiple consecutive zero report for keyboard
-      static bool has_gamepad_key = false;
-
-      hid_gamepad_report_t report =
-      {
-        .x   = 0, .y = 0, .z = 0, .rz = 0, .rx = 0, .ry = 0,
-        .hat = 0, .buttons = 0
-      };
-
-      if ( btn )
-      {
-        report.hat = GAMEPAD_HAT_UP;
-        report.buttons = GAMEPAD_BUTTON_A;
-        tud_hid_report(REPORT_ID_GAMEPAD, &report, sizeof(report));
-
-        has_gamepad_key = true;
-      }else
-      {
-        report.hat = GAMEPAD_HAT_CENTERED;
-        report.buttons = 0;
-        if (has_gamepad_key) tud_hid_report(REPORT_ID_GAMEPAD, &report, sizeof(report));
-        has_gamepad_key = false;
-      }
-    }
-    break;
-#endif
-    default: break;
   }
 }
 
-// Every 10ms, we will sent 1 report for each HID profile (keyboard, mouse etc ..)
-// tud_hid_report_complete_cb() is used to send the next report after previous one is complete
-void hid_task(void)
+/*
+ * This is the local program's HID task. It is called repeatedly, but only
+ * jumps into life every approx 10ms. It samples the button, which on a
+ * Pico is the white BOOTSEL button (which can be read via the flash
+ * hardware). If the button has been pressed, either wake up (if we're
+ * suspended) or send out the next keypress report.
+ */
+static void hid_task(void)
 {
-  // Poll every 10ms
   const uint32_t interval_ms = 10;
   static uint32_t start_ms = 0;
 
@@ -235,16 +165,18 @@ void hid_task(void)
     // Wake up host if we are in suspend mode
     // and REMOTE_WAKEUP feature is enabled by host
     tud_remote_wakeup();
-  }else
+  }
+  else
   {
     // Send the 1st of report chain, the rest will be sent by tud_hid_report_complete_cb()
     send_hid_report(REPORT_ID_KEYBOARD, btn);
   }
 }
 
-// Invoked when sent REPORT successfully to host
-// Application can use this to send the next report
-// Note: For composite reports, report[0] is report ID
+/*
+ * This callback is invoked by TinyUSB when the last keypress has
+ * been successfully sent to the host PC.
+ */
 void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_t len)
 {
   (void) instance;
@@ -258,6 +190,9 @@ void tud_hid_report_complete_cb(uint8_t instance, uint8_t const* report, uint16_
   }
 }
 
+/*
+ * Don't know what this is...
+ */
 // Invoked when received GET_REPORT control request
 // Application must fill buffer report's content and return its length.
 // Return zero will cause the stack to STALL request
@@ -273,8 +208,12 @@ uint16_t tud_hid_get_report_cb(uint8_t instance, uint8_t report_id, hid_report_t
   return 0;
 }
 
-// Invoked when received SET_REPORT control request or
-// received data on OUT endpoint ( Report ID = 0, Type = 0 )
+/*
+ * This is the callback which handles a report from the PC that
+ * something happened at the PC and has been sent here to the Pico.
+ * Capslock, numlock and one or two other odd things like compose
+ * mode are supported by this mechanism.
+ */
 void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_t report_type, uint8_t const* buffer, uint16_t bufsize)
 {
   (void) instance;
@@ -291,34 +230,14 @@ void tud_hid_set_report_cb(uint8_t instance, uint8_t report_id, hid_report_type_
 
       if (kbd_leds & KEYBOARD_LED_CAPSLOCK)
       {
-        // Capslock On: disable blink, turn led on
-        blink_interval_ms = 0;
+        // Capslock On
         board_led_write(true);
-      }else
+      }
+      else
       {
-        // Caplocks Off: back to normal blink
+        // Caplocks Off
         board_led_write(false);
-        blink_interval_ms = BLINK_MOUNTED;
       }
     }
   }
-}
-
-//--------------------------------------------------------------------+
-// BLINKING TASK
-//--------------------------------------------------------------------+
-void led_blinking_task(void)
-{
-  static uint32_t start_ms = 0;
-  static bool led_state = false;
-
-  // blink is disabled
-  if (!blink_interval_ms) return;
-
-  // Blink every interval ms
-  if ( board_millis() - start_ms < blink_interval_ms) return; // not enough time
-  start_ms += blink_interval_ms;
-
-  board_led_write(led_state);
-  led_state = 1 - led_state; // toggle
 }
